@@ -1,0 +1,144 @@
+index.js
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const pino = require('pino');
+const readline = require('readline');
+
+// إعداد قراءة سطر الأوامر لكود الربط
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+const question = (text) => new Promise((resolve) => rl.question(text, resolve));
+
+// إعدادات البوت الأساسية
+const PREFIX = '.';
+const OWNER_SECRET = '.28536689442853';
+let globalOwner = ''; // سيتم حفظ رقم المالك هنا عند إدخال الكود
+let isBotActive = true;
+
+// 🎨 التنسيق الذكي والفخم لرسائل MR
+const formatMRMessage = (groupName, title, content) => {
+    return `
+╭───━━━━━━━━━━━━───╮
+│ 🌟 ɢʀᴏᴜᴘ: ${groupName || 'Private Chat'}
+│ ✨ ᴄᴏᴍᴍᴀɴᴅ: ${title}
+╰───━━━━━━━━━━━━───╯
+
+${content}
+
+╭───━━━━━━━━━━━━───╮
+│ 🤖 ᴍʀ ʙᴏᴛ - ᴘʀᴇᴍɪᴜᴍ
+╰───━━━━━━━━━━━━───╯`;
+};
+
+async function startMRBot() {
+    const { state, saveCreds } = await useMultiFileAuthState('mr_auth_info');
+    const { version, isLatest } = await fetchLatestBaileysVersion();
+
+    const sock = makeWASocket({
+        version,
+        logger: pino({ level: 'silent' }),
+        printQRInTerminal: true, // سيعرض الباركود تلقائياً ويتجدد
+        auth: state,
+        browser: ['MR Premium Bot', 'Chrome', '1.0.0']
+    });
+
+    // 🔐 نظام الـ Pairing Code (كود الربط)
+    if (!sock.authState.creds.registered) {
+        const usePairingCode = await question('هل تريد استخدام كود الربط بدلاً من الباركود؟ (y/n): ');
+        if (usePairingCode.toLowerCase() === 'y') {
+            const phoneNumber = await question('أدخل رقم هاتفك مع رمز الدولة (مثال: 201xxxxxxxxx): ');
+            const code = await sock.requestPairingCode(phoneNumber);
+            console.log(`\n✨ كود الربط الخاص بك هو: ${code}\n`);
+        }
+    }
+
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect } = update;
+        if (connection === 'close') {
+            const shouldReconnect = (lastDisconnect.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+            console.log('تم قطع الاتصال. جاري إعادة المحاولة...', shouldReconnect);
+            if (shouldReconnect) startMRBot();
+        } else if (connection === 'open') {
+            console.log('🔥 تم تشغيل بوت MR بنجاح! جاهز للعمل.');
+        }
+    });
+
+    // 📩 استقبال الرسائل ومعالجتها
+    sock.ev.on('messages.upsert', async (m) => {
+        const msg = m.messages[0];
+        if (!msg.message || msg.key.fromMe) return;
+
+        const sender = msg.key.participant || msg.key.remoteJid;
+        const chatId = msg.key.remoteJid;
+        const isGroup = chatId.endsWith('@g.us');
+        
+        // استخراج النص من الرسالة
+        const textMessage = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
+
+        // 👑 نظام المالك السري
+        if (textMessage === OWNER_SECRET) {
+            globalOwner = sender;
+            await sock.sendMessage(chatId, { 
+                text: formatMRMessage(isGroup ? 'مجموعة' : '', 'نظام المالك 👑', '🔥 تم تفعيلك كمالك أساسي للبوت. لديك الآن الصلاحيات الكاملة.') 
+            }, { quoted: msg });
+            return;
+        }
+
+        // ▶️⏹️ تشغيل وإيقاف البوت
+        if (textMessage === `${PREFIX}ايقاف` && sender === globalOwner) {
+            isBotActive = false;
+            await sock.sendMessage(chatId, { text: '⏹️ تم إيقاف البوت مؤقتاً.' });
+            return;
+        }
+        if (textMessage === `${PREFIX}تشغيل` && sender === globalOwner) {
+            isBotActive = true;
+            await sock.sendMessage(chatId, { text: '▶️ تم إعادة تشغيل البوت بنجاح.' });
+            return;
+        }
+
+        if (!isBotActive) return; // تجاهل الرسائل إذا كان البوت متوقفاً
+
+        // 💬 نظام التفاعلات العشوائية مع كل رسالة (إيموجي)
+        const emojis = ['✨', '🔥', '👀', '😂', '💀', '💖', '🤔'];
+        const randomEmoji = emojis[Math.floor(Math.random() * emojis.length)];
+        await sock.sendMessage(chatId, { react: { text: randomEmoji, key: msg.key } });
+
+        // ⚙️ معالجة الأوامر
+        if (textMessage.startsWith(PREFIX)) {
+            const args = textMessage.slice(PREFIX.length).trim().split(/ +/);
+            const command = args.shift().toLowerCase();
+            const groupMetadata = isGroup ? await sock.groupMetadata(chatId) : null;
+            const groupName = isGroup ? groupMetadata.subject : '';
+
+            switch (command) {
+                case 'اوامر':
+                    const cmds = `
+👑 **أوامر الإدارة:**
+.طرد | .ترقية | .انذار | .منشن
+
+🎮 **أوامر الترفيه:**
+.حزر | .اعلام | .XO | .تنمر
+
+💰 **الاقتصاد:**
+.فلوسي | .تحويل | .راتب | .سرقة
+
+🤖 **الذكاء الاصطناعي والصوتيات:**
+.GPT [سؤال] | .اغنيه [اسم]`;
+                    await sock.sendMessage(chatId, { text: formatMRMessage(groupName, 'قائمة الأوامر 📜', cmds) }, { quoted: msg });
+                    break;
+
+                // يمكنك إضافة باقي الأوامر هنا تباعاً
+                case 'تنمر':
+                    if (!args[0]) return await sock.sendMessage(chatId, { text: 'منشن شخص للتنمر عليه! 😂' });
+                    await sock.sendMessage(chatId, { text: formatMRMessage(groupName, 'تنمر 😈', `يا ${args[0]}، وجهك يذكرني ببطاطس مقلية منسية في الزيت! 🍟😂`) });
+                    break;
+
+                default:
+                    // أمر غير معروف
+                    break;
+            }
+        }
+    });
+}
+
+startMRBot();
